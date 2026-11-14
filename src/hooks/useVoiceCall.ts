@@ -1,40 +1,54 @@
-// Live voice call with the ElevenLabs agent. Client tools run here and call our backend;
-// the agent only ever receives the decision and what to say, never fraud signals.
+// Live voice call with the ElevenLabs agent. The agent's tools run here and call our backend;
+// the agent only receives the decision and what to say, never the reasons behind it.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Conversation } from "@elevenlabs/client";
 import { api } from "../api/client";
-import type { MerchantId } from "../api/types";
 
-export type CallLine = { role: "agent" | "caller" | "tool"; text: string };
-export type CallStatus = "unconfigured" | "idle" | "connecting" | "listening" | "speaking" | "saving";
+export type Line = { who: "agent" | "caller" | "system"; text: string };
+export type CallStatus = "off" | "connecting" | "listening" | "speaking" | "saving" | "unavailable";
 
-export function useVoiceCall(merchantId: MerchantId, notify: (msg: string) => void) {
-  const [status, setStatus] = useState<CallStatus>("idle");
-  const [lines, setLines] = useState<CallLine[]>([]);
+export function useVoiceCall(onError: (msg: string) => void) {
+  const [status, setStatus] = useState<CallStatus>("off");
+  const [lines, setLines] = useState<Line[]>([]);
   const convo = useRef<Conversation | null>(null);
   const claimIds = useRef<string[]>([]);
-  const ending = useRef(false);
-
-  const add = (line: CallLine) => setLines((l) => [...l, line]);
+  const add = (line: Line) => setLines((l) => [...l, line]);
 
   useEffect(() => {
-    api.voiceConfig().then((c) => !c.configured && setStatus("unconfigured")).catch(() => {});
+    api.voiceConfig().then((c) => !c.configured && setStatus("unavailable")).catch(() => {});
   }, []);
 
   const finish = useCallback(async () => {
     const c = convo.current;
-    if (!c || ending.current) return;
-    ending.current = true;
+    if (!c) return;
     convo.current = null;
     setStatus("saving");
-    try {
-      await api.saveCall(merchantId, c.getId(), claimIds.current);
-    } catch (e) {
-      notify(`Couldn't save call: ${(e as Error).message}`);
-    }
-    setStatus("idle");
-    ending.current = false;
-  }, [merchantId, notify]);
+    await api.saveCall(c.getId(), claimIds.current).catch((e) => onError(e.message));
+    setStatus("off");
+  }, [onError]);
+
+  const tools = {
+    check_claim: async (p: { order_number: string; claim_text: string; caller_questions?: string }) => {
+      add({ who: "system", text: `Checking order ${p.order_number}…` });
+      try {
+        const callerQuestions = (p.caller_questions ?? "").split("|").map((q) => q.trim()).filter(Boolean);
+        const r = await api.checkClaim({ orderId: String(p.order_number), claimText: p.claim_text, callerQuestions });
+        claimIds.current.push(r.claimId);
+        return JSON.stringify({ claimId: r.claimId, decision: r.decision, item: r.order.item, amount: r.order.amount, previousContacts: r.previousContacts, agentGuidance: r.agentGuidance });
+      } catch (e) {
+        return JSON.stringify({ error: (e as Error).message });
+      }
+    },
+    issue_refund: async (p: { claim_id: string }) => {
+      try {
+        const r = await api.issueRefund(p.claim_id);
+        add({ who: "system", text: `Refunded $${r.amount}` });
+        return JSON.stringify({ ok: true, amount: r.amount });
+      } catch (e) {
+        return JSON.stringify({ ok: false, error: (e as Error).message });
+      }
+    },
+  };
 
   const start = useCallback(async () => {
     setStatus("connecting");
@@ -42,54 +56,33 @@ export function useVoiceCall(merchantId: MerchantId, notify: (msg: string) => vo
     claimIds.current = [];
     try {
       await navigator.mediaDevices.getUserMedia({ audio: true });
-      const [{ signedUrl }, { Conversation }] = await Promise.all([api.signedUrl(), import("@elevenlabs/client")]);
+      const [{ signedUrl }, { Conversation, stripAudioTags }] = await Promise.all([api.signedUrl(), import("@elevenlabs/client")]);
       convo.current = await Conversation.startSession({
         signedUrl,
-        clientTools: {
-          check_claim: async (p: { order_number: string; claim_text: string; caller_questions?: string }) => {
-            add({ role: "tool", text: `checking claim on order ${p.order_number}…` });
-            try {
-              const callerQuestions = (p.caller_questions ?? "").split("|").map((q) => q.trim()).filter(Boolean).slice(0, 5);
-              const r = await api.checkClaim(merchantId, { orderId: String(p.order_number), claimText: p.claim_text, callerQuestions });
-              claimIds.current.push(r.claimId);
-              add({ role: "tool", text: `${r.decision} (risk ${r.riskScore}/${r.escalateAt})` });
-              return JSON.stringify({ claimId: r.claimId, decision: r.decision, item: r.order.item, amount: r.order.amount, previousContacts: r.previousContacts, agentGuidance: r.agentGuidance });
-            } catch (e) {
-              add({ role: "tool", text: `error: ${(e as Error).message}` });
-              return JSON.stringify({ error: (e as Error).message });
-            }
-          },
-          issue_refund: async (p: { claim_id: string }) => {
-            add({ role: "tool", text: "issuing refund…" });
-            try {
-              const r = await api.issueRefund(merchantId, p.claim_id);
-              add({ role: "tool", text: `refunded $${r.amount}` });
-              return JSON.stringify({ ok: true, amount: r.amount });
-            } catch (e) {
-              add({ role: "tool", text: `refused: ${(e as Error).message}` });
-              return JSON.stringify({ ok: false, error: (e as Error).message });
-            }
-          },
-        },
+        clientTools: tools,
         onConnect: () => setStatus("listening"),
         onDisconnect: () => void finish(),
         onModeChange: ({ mode }) => setStatus(mode === "speaking" ? "speaking" : "listening"),
-        onMessage: ({ source, message }) => message && add({ role: source === "ai" ? "agent" : "caller", text: message }),
-        onError: (msg) => notify(`Voice error: ${msg}`),
+        // stripAudioTags removes voice-style hints like "[warm]" from the agent's text.
+        onMessage: ({ source, message }) => message && add({ who: source === "ai" ? "agent" : "caller", text: stripAudioTags(message) }),
+        onError: (msg) => onError(msg),
       });
     } catch (e) {
-      notify((e as Error).message);
-      convo.current = null;
-      setStatus("idle");
+      onError((e as Error).message);
+      setStatus("off");
     }
-  }, [merchantId, notify, finish]);
+  }, [finish, onError]);
 
   const end = useCallback(async () => {
     await convo.current?.endSession();
     await finish();
   }, [finish]);
 
-  useEffect(() => () => void convo.current?.endSession(), []);
+  useEffect(() => {
+    return () => {
+      void convo.current?.endSession();
+    };
+  }, []);
 
-  return { status, lines, start, end, active: Boolean(convo.current) || status === "connecting" };
+  return { status, lines, start, end };
 }

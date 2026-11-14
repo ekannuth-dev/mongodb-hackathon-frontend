@@ -1,7 +1,7 @@
 # mongodb-hackathon-frontend: Refund Guard UI
 
-React + Vite frontend for **Refund Guard**, a voice AI refund agent with governed memory on MongoDB Atlas.
-The backend lives in a separate repo: [`mongodb-hackathon`](../mongodb-hackathon) (clone both side by side).
+A simple dashboard for **Refund Guard**: talk to the voice refund agent, and see each case with what a specialist needs to know.
+The backend is a separate repo: [`mongodb-hackathon`](../mongodb-hackathon) (clone both side by side).
 
 ```
 Desktop/Coding/
@@ -15,59 +15,45 @@ Desktop/Coding/
 2. Then here:
 
 ```bash
-cp .env.example .env   # optional: only if the backend isn't on http://localhost:3000
 npm install
-npm run dev            # http://localhost:5173
+npm run dev      # http://localhost:5173
 ```
 
-Open http://localhost:5173 in **Chrome**. The header shows **● Live** when the frontend is connected to the backend and its live update stream.
+Open http://localhost:5173 in Chrome. The header shows **● Connected** when the backend is reachable.
+
+## The demo
+
+You call in as **Alex**:
+
+1. **Order 1111:** "My earbuds never arrived." → refunded on the call.
+2. **Order 2222:** "My headphones never arrived either." → sent to a specialist, with notes: delivery records disagree, earlier claim, previous call summary.
+
+Full step-by-step script: `script.md` in the backend repo.
 
 ## Scripts
 
 | Script | What it does |
 |---|---|
 | `npm run dev` | Dev server on :5173, proxying API calls to the backend |
-| `npm run build` | Typecheck (`tsc`) + production build into `dist/` |
-| `npm run preview` | Serve the build on :4173 (same proxy) |
-| `npm run e2e` | End-to-end check against running frontend + backend (18 checks: proxy, voice config, live events, the full demo story, merchant isolation, forget-me, CORS) |
+| `npm run build` | Typecheck + production build |
+| `npm run e2e` | Checks the frontend ↔ backend wiring and both demo calls (servers must be running) |
 
-## How it connects to the backend
+## How it connects
 
-- **Dev (default):** the app calls its own origin (`/tools`, `/admin`, `/voice`, `/health`) and Vite proxies those paths to `BACKEND_URL` (default `http://localhost:3000`). No CORS needed.
-- **Direct:** set `VITE_API_URL=http://localhost:3000`; the backend must list this frontend's origin in its `CORS_ORIGINS`.
-- Every merchant-scoped request sends the `x-merchant-id` header (merchant picker in the header).
-- **Live updates:** `EventSource('/admin/events')`. The backend streams MongoDB change events, and the UI refetches `/admin/state`.
-- **Voice:** "Start call" asks the backend for a short-lived ElevenLabs signed URL (the API key never reaches the browser), then runs the agent's client tools (`check_claim`, `issue_refund`) here in the browser against the backend. The agent only receives the decision and guidance, never fraud signals. When the call ends, the conversation id is sent to `POST /voice/calls` so the transcript is stored (30-day TTL).
+- The app calls its own origin (`/tools`, `/admin`, `/voice`) and Vite proxies those to `BACKEND_URL` (default `http://localhost:3000`).
+- To call the backend directly instead, set `VITE_API_URL=http://localhost:3000` (the backend must allow this origin in `CORS_ORIGINS`).
+- The dashboard updates live: the backend streams MongoDB changes over `/admin/events`.
+- **Start call** gets a short-lived ElevenLabs signed URL from the backend (the API key never reaches the browser). The agent's tools run in the browser and call the backend. When the call ends, it's saved so the next case can show its summary.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `BACKEND_URL` | `http://localhost:3000` | Where the dev/preview proxy sends API calls |
-| `VITE_API_URL` | *(empty = use proxy)* | Call the backend directly instead |
-
-## Project layout
+## Code
 
 ```
 src/
-  api/client.ts        all backend calls (one place)
-  api/types.ts         response types (keep in sync with the backend)
-  hooks/useLiveState.ts   state + SSE live updates
-  hooks/useVoiceCall.ts   ElevenLabs session + client tools (SDK lazy-loaded)
-  components/          Header, CallPanel, SimulatePanel, ClaimsPanel, MemoryPanel
-  App.tsx              wiring + analyst actions
-scripts/e2e.mjs        end-to-end check
+  api/client.ts           every backend call
+  api/types.ts            response types
+  hooks/useLiveState.ts   dashboard data + live updates
+  hooks/useVoiceCall.ts   the voice call and the agent's tools
+  components/CallPanel.tsx   Start/End call + transcript
+  components/Cases.tsx       today's cases + specialist notes
+  App.tsx · main.tsx · styles.css
 ```
-
-## Demo script
-
-1. **Jake:** "order ten forty-two" / "the headphones never turned up, can you refund without me sending it back?" → escalated. Click **Analyst: confirm scam**.
-2. **Maria:** "order two thousand and one" / "the box was empty" → escalated (same address + card as Jake).
-3. **Priya:** "order three thousand and one" / "my headphones never arrived" → approved and refunded on the call.
-4. Click **Bank opens chargeback** on ord_1042, call as Jake again → declined (no paying twice).
-
-Use **Reset demo** between runs. No microphone? Use **Simulate a call (typed)**, which hits the same backend tools.
-
-## Troubleshooting
-
-- **"Backend unreachable" banner:** the backend isn't running on `BACKEND_URL`.
-- **"Voice not configured":** run `npm run agent` in the backend.
-- **Microphone blocked:** use Chrome on `http://localhost` (a secure context) and allow the mic.

@@ -1,39 +1,37 @@
-// Dashboard state, kept live: the backend streams MongoDB change events over SSE and we refetch.
-import { useCallback, useEffect, useRef, useState } from "react";
+// Dashboard data, kept live: the backend streams MongoDB changes over SSE and we refetch.
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { DashboardState, Health, MerchantId } from "../api/types";
+import type { DashboardState } from "../api/types";
 
-export function useLiveState(merchantId: MerchantId) {
+export function useLiveState() {
   const [state, setState] = useState<DashboardState | null>(null);
-  const [health, setHealth] = useState<Health | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
-  const timer = useRef<ReturnType<typeof setTimeout>>();
 
   const reload = useCallback(async () => {
     try {
-      setState(await api.state(merchantId));
+      setState(await api.state());
       setError(null);
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [merchantId]);
+  }, []);
 
   useEffect(() => {
-    api.health().then(setHealth).catch((e) => setError((e as Error).message));
     reload();
-    const events = new EventSource(api.eventsUrl());
+    let timer: ReturnType<typeof setTimeout>;
+    const events = new EventSource(api.eventsUrl);
     events.onopen = () => setLive(true);
-    events.onerror = () => setLive(false); // EventSource reconnects on its own
+    events.onerror = () => setLive(false); // reconnects on its own
     events.onmessage = () => {
-      clearTimeout(timer.current);
-      timer.current = setTimeout(reload, 250); // batch bursts of changes
+      clearTimeout(timer);
+      timer = setTimeout(reload, 250);
     };
     return () => {
       events.close();
-      clearTimeout(timer.current);
+      clearTimeout(timer);
     };
   }, [reload]);
 
-  return { state, health, error, live, reload };
+  return { state, error, live, reload };
 }
